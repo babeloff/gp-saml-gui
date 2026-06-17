@@ -290,6 +290,7 @@ def parse_args(args = None):
     x.add_argument('-E','--exec-openconnect', action='store_const', dest='exec', const='exec', help='Execute openconnect directly (advanced users)')
     g.add_argument('-u','--uri', action='store_true', help='Treat server as the complete URI of the SAML entry point, rather than GlobalProtect server')
     g.add_argument('--clientos', choices=set(pf2clientos.values()), default=default_clientos, help="clientos value to send (default is %(default)s)")
+    g.add_argument('--clientver', type=int, default=6000, help="clientVer value to send in prelogin request (default %(default)s; use 4100 for older servers)")
     p.add_argument('-f','--field', dest='extra', action='append', default=[],
                    help='Extra form field(s) to pass to include in the login query string (e.g. "-f magic-cookie-value=deadbeef01234567")')
     p.add_argument('--allow-insecure-crypto', dest='insecure', action='store_true',
@@ -334,7 +335,7 @@ def main(args = None):
         sam, uri, html = 'URI', args.server, None
     else:
         endpoint = 'https://{}/{}'.format(args.server, if2prelogin[args.interface])
-        data = {'tmp':'tmp', 'kerberos-support':'yes', 'ipv6-support':'yes', 'clientVer':4100, 'clientos':args.clientos, **args.extra}
+        data = {'tmp':'tmp', 'kerberos-support':'yes', 'ipv6-support':'yes', 'clientVer':args.clientver, 'clientos':args.clientos, **args.extra}
         if args.verbose:
             print("Looking for SAML auth tags in response to %s..." % endpoint, file=stderr)
         try:
