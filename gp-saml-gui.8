@@ -19,6 +19,10 @@ gp-saml-gui \- login to a GlobalProtect VPN that uses SAML authentication
 .OP -E
 .OP -u
 .OP --clientos {Windows,Linux,Mac}
+.OP --clientver CLIENTVER
+.OP --allow-insecure-crypto
+.OP --user-agent AGENT
+.OP --no-proxy
 .OP -f EXTRA
 .B server
 .OP --
@@ -110,6 +114,25 @@ than GlobalProtect server
 .IP
 .B --clientos {Mac,Linux,Windows}
 clientos value to send
+.IP
+.B --clientver CLIENTVER
+clientVer value to send in the prelogin request (default 6000; use 4100 for older servers)
+.IP
+.B --allow-insecure-crypto
+Allow use of insecure legacy renegotiation or ancient 3DES and RC4 ciphers,
+required by some older GlobalProtect servers
+.IP
+.B --user-agent AGENT, --useragent AGENT
+HTTP User\-Agent string to send (default is \fIPAN GlobalProtect\fR, as used by OpenConnect)
+.IP
+.B --no-proxy
+Disable system proxy settings for the embedded WebKit browser
+
+.SH ENVIRONMENT
+.TP
+.B SSLKEYLOGFILE
+When \fB--allow-insecure-crypto\fR is active, TLS session keys are appended to this
+file so that traffic can be decrypted by tools such as Wireshark.
 
 .SH SEE ALSO
 .BR openconnect (8)

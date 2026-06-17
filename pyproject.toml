@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gp-saml-gui"
+version = "0.1.4"
+description = "Interactively authenticate to GlobalProtect VPNs that require SAML"
+readme = "README.md"
+requires-python = ">=3.5"
+dependencies = [
+    "requests",
+    "pygobject",
+]
+
+[project.license]
+text = "GPL-3.0-or-later"
+
+[[project.authors]]
+name = "Daniel Lenski"
+email = "dlenski@gmail.com"
+
+[[project.authors]]
+name = "Fred Eisele"
+email = "fredrick.eisele@gmail.com"
+
+[project.urls]
+Homepage = "https://github.com/babeloff/gp-saml-gui"
+
+[project.scripts]
+gp-saml-gui = "gp_saml_gui:main"
+
+[tool.hatch.build.targets.wheel]
+include = ["gp_saml_gui.py"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"gp-saml-gui.8" = "share/man/man8/gp-saml-gui.8"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "gp_saml_gui.py",
+    "gp-saml-gui.8",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.pixi.workspace]
+channels = ["./output", "conda-forge"]
+platforms = ["linux-64"]
+requires-pixi = ">=0.59.0"
+
+[tool.pixi.pypi-dependencies."gp-saml-gui"]
+path = "."
+editable = true
+
+[tool.pixi.dependencies]
+requests = ">=2.34.2,<3"
+pygobject = ">=3.56.3,<4"
+
+[tool.pixi.feature.build.dependencies]
+rattler-build = ">=0.40"
+conda-index = ">=0.3.0"
+nushell = "*"
+
+[tool.pixi.feature.build.tasks.build]
+cmd = "rattler-build build --recipe recipe/recipe.yaml --output-dir output/ && conda index output/"
+description = "Build the conda package and re-index the local output/ channel"
+
+[tool.pixi.feature.build.tasks.global-install]
+cmd = "nu scripts/global-install.nu"
+description = "Install/update the built conda package into a global pixi environment"
+depends-on = ["build"]
+
+[tool.pixi.feature.lint.dependencies]
+conda-smithy = ">=3.44.6,<4"
+python = "3.12.*"
+
+[tool.pixi.feature.lint.tasks.lint]
+cmd = "conda-smithy recipe-lint --conda-forge recipe/"
+description = "Lint the conda recipe"
+
+[tool.pixi.environments.build]
+features = ["build"]
+no-default-feature = true
+
+[tool.pixi.environments.lint]
+features = ["lint"]
+no-default-feature = true

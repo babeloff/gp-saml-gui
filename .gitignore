@@ -1,0 +1,8 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# rattler-build output / local conda channel
+output/
+dist/gp_saml_gui-0.1.1-py3-none-any.whl
+dist/gp_saml_gui-0.1.1.tar.gz

@@ -35,7 +35,7 @@ from os import path, dup2, execvp, environ
 from shlex import quote
 from sys import stderr, platform
 from binascii import a2b_base64, b2a_base64
-from urllib.parse import urlparse, urlencode, urlunsplit
+from urllib.parse import urlparse, urlencode, urlunsplit, unquote
 from html.parser import HTMLParser
 
 
@@ -63,6 +63,7 @@ class SAMLLoginView:
         self.success = False
         self.saml_result = {}
         self.verbose = args.verbose
+        self.server = args.server
 
         self.ctx = WebKit2.WebContext.get_default()
         if not args.verify:
@@ -81,6 +82,8 @@ class SAMLLoginView:
             args.user_agent = 'PAN GlobalProtect'
         settings = self.wview.get_settings()
         settings.set_user_agent(args.user_agent)
+        settings.set_enable_javascript(True)
+        settings.set_enable_javascript_markup(True)
         self.wview.set_settings(settings)
 
         window.resize(500, 500)
@@ -90,6 +93,8 @@ class SAMLLoginView:
         window.connect('delete-event', self.close)
         self.wview.connect('load-changed', self.on_load_changed)
         self.wview.connect('resource-load-started', self.log_resources)
+        self.wview.connect('notify::uri', self.on_uri_changed)
+        self.wview.connect('decide-policy', self.on_decide_policy)
 
         if html:
             self.wview.load_html(html, uri)
@@ -129,7 +134,63 @@ class SAMLLoginView:
         if charset or content_type.startswith('text/'):
             print(data.decode(charset or 'utf-8'), file=stderr)
 
+    def on_uri_changed(self, webview, param):
+        uri = webview.get_uri()
+        if self.verbose and uri:
+            print('[NAV    ] URI changed → %s' % uri, file=stderr)
+
+    def on_decide_policy(self, webview, decision, decision_type):
+        if decision_type == WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+            action = decision.get_navigation_action()
+            req = action.get_request()
+            method = req.get_http_method() or 'Request'
+            uri = req.get_uri()
+            if self.verbose:
+                print('[POLICY ] Navigation %s → %s' % (method, uri), file=stderr)
+            if uri.startswith('globalprotectcallback:'):
+                self._handle_cas_callback(uri)
+                decision.ignore()
+                return True
+            decision.use()
+            return True
+        return False
+
+    def _handle_cas_callback(self, uri):
+        """Parse globalprotectcallback:cas-as=1&un=...&token=... and store auth result."""
+        qs = uri[len('globalprotectcallback:'):]
+        params = {}
+        for part in qs.split('&'):
+            k, _, v = part.partition('=')
+            if k:
+                params[k] = unquote(v)
+
+        username = params.get('un', '')
+        token = params.get('token', '')
+
+        if not username or not token:
+            print('[SAML   ] CAS callback missing un or token', file=stderr)
+            return
+
+        if self.verbose:
+            print('[SAML   ] Got CAS callback: un=%s cas-as=%s' % (username, params.get('cas-as', '?')), file=stderr)
+
+        self.saml_result['saml-username'] = username
+        self.saml_result['portal-userauthcookie'] = token
+        self.saml_result['cas-as'] = params.get('cas-as', '1')
+        self.saml_result['server'] = self.server
+        self.check_done()
+
     def on_load_changed(self, webview, event):
+        event_names = {
+            WebKit2.LoadEvent.STARTED:     'STARTED',
+            WebKit2.LoadEvent.REDIRECTED:  'REDIRECT',
+            WebKit2.LoadEvent.COMMITTED:   'COMMIT ',
+            WebKit2.LoadEvent.FINISHED:    'FINISH ',
+        }
+        if self.verbose > 1:
+            uri = webview.get_uri() or '(none)'
+            print('[LOAD   ] %s %s' % (event_names.get(event, str(event)), uri), file=stderr)
+
         if event != WebKit2.LoadEvent.FINISHED:
             return
 
@@ -152,8 +213,19 @@ class SAMLLoginView:
         # convert to normal dict
         d = {}
         h.foreach(lambda k, v: setitem(d, k.lower(), v))
-        # filter to interesting headers
+        # filter to interesting headers (direct response headers)
         fd = {name: v for name, v in d.items() if name.startswith('saml-') or name in COOKIE_FIELDS}
+        # also check Set-Cookie for portal cookies delivered as HTTP cookies
+        set_cookie = d.get('set-cookie', '')
+        for field in COOKIE_FIELDS:
+            if field not in fd and field + '=' in set_cookie:
+                for part in set_cookie.split(';'):
+                    part = part.strip()
+                    if part.lower().startswith(field + '='):
+                        fd[field] = part[len(field)+1:]
+                        if self.verbose:
+                            print('[SAML   ] Found %s in Set-Cookie header' % field, file=stderr)
+                        break
 
         if fd:
             if self.verbose:
@@ -318,6 +390,80 @@ def parse_args(args = None):
 
     return p, args
 
+def _cas_getconfig(s, server, un, cv, args):
+    """POST portal cookie to getconfig.esp (no prelogin needed) and return best gateway address.
+
+    For the CAS flow the server delivers the real portal-userauthcookie as an HTTP
+    Set-Cookie on SAML20/SP/ACS, stored in the WebKit2 cookie file.  The JWT in the
+    globalprotectcallback: URL is for the native GP client only and is rejected by
+    getconfig.esp.  We prefer the cookie-file value; the JWT is a last resort.
+    """
+    import http.cookiejar
+
+    endpoint = 'https://{}/global-protect/getconfig.esp'.format(server)
+
+    # Try to find the real portal-userauthcookie in the WebKit2 cookie file.
+    # This is the Set-Cookie value from SAML20/SP/ACS, not the JWT.
+    portal_cookie = cv   # fallback: the JWT itself
+    if args.cookies and path.exists(args.cookies):
+        cj = http.cookiejar.MozillaCookieJar()
+        try:
+            cj.load(args.cookies, ignore_discard=True, ignore_expires=True)
+            for c in cj:
+                if c.name == 'portal-userauthcookie' and server in (c.domain or ''):
+                    portal_cookie = c.value
+                    if args.verbose:
+                        print('[CAS    ] Found portal-userauthcookie in browser cookie jar', file=stderr)
+                    break
+            # Also inject all browser cookies into the session so the server sees them
+            s.cookies.update({c.name: c.value for c in cj})
+        except Exception as ex:
+            if args.verbose:
+                print('[CAS    ] Could not load cookie file %s: %s' % (args.cookies, ex), file=stderr)
+
+    data = {
+        'user': un,
+        'passwd': '',
+        'clientos': args.clientos,
+        'os-version': args.clientos,
+        'computer': 'localhost',
+        'cas-as': '1',
+        'portal-userauthcookie': portal_cookie,
+    }
+    if args.verbose:
+        src = 'browser-cookie' if portal_cookie != cv else 'jwt-token'
+        print('[CAS    ] POSTing to %s (source=%s)...' % (endpoint, src), file=stderr)
+    try:
+        res = s.post(endpoint, data=data, verify=args.verify)
+        if args.verbose:
+            print('[CAS    ] getconfig.esp HTTP %d, %d bytes' % (res.status_code, len(res.content)), file=stderr)
+        if not res.content:
+            print('[CAS    ] getconfig.esp returned empty body — cookie may be expired or wrong format', file=stderr)
+            return None
+        xml = ET.fromstring(res.content)
+    except Exception as ex:
+        print('[CAS    ] getconfig.esp failed: %s' % ex, file=stderr)
+        return None
+
+    status = xml.find('status')
+    if status is not None and status.text.lower() != 'success':
+        msg = xml.find('msg')
+        print('[CAS    ] getconfig.esp error: %s' % (msg.text if msg is not None else 'unknown'), file=stderr)
+        return None
+
+    # Prefer the first external gateway by priority order; fall back to any entry/@name
+    for gw in xml.findall('.//gateways/external/list/entry'):
+        addr = gw.get('name')
+        if addr:
+            if args.verbose:
+                print('[CAS    ] Using gateway: %s' % addr, file=stderr)
+            return addr
+
+    if args.verbose:
+        print('[CAS    ] No gateways found in getconfig.esp response; falling back', file=stderr)
+    return None
+
+
 def main(args = None):
     p, args = parse_args(args)
 
@@ -339,7 +485,7 @@ def main(args = None):
         if args.verbose:
             print("Looking for SAML auth tags in response to %s..." % endpoint, file=stderr)
         try:
-            res = s.post(endpoint, verify=args.verify, data=data)
+            res = s.post(endpoint, verify=args.verify, params=data)
         except Exception as ex:
             rootex = ex
             while True:
@@ -416,15 +562,34 @@ def main(args = None):
         cn = ifh = None
         p.error("Didn't get an expected cookie. Something went wrong.")
 
-    urlpath = args.interface + ":" + cn
-    openconnect_args = [
-        "--protocol=gp",
-        "--user="+un,
-        "--os="+args.ocos,
-        "--usergroup="+urlpath,
-        "--passwd-on-stdin",
-        server
-    ] + args.openconnect_extra
+    # CAS flows deliver a JWT via globalprotectcallback: — openconnect's portal path always
+    # does a fresh prelogin.esp (hardcoded clientVer=4100) before submitting the cookie,
+    # which the server rejects. Instead, POST the JWT directly to getconfig.esp (no prelogin
+    # required) to learn the gateway address, then connect to the gateway directly.
+    cas_gateway = None
+    if cn == 'portal-userauthcookie' and cv.startswith('eyJ'):
+        cas_gateway = _cas_getconfig(s, server, un, cv, args)
+
+    if cas_gateway:
+        urlpath = 'gateway:prelogin-cookie'
+        openconnect_args = [
+            "--protocol=gp",
+            "--user="+un,
+            "--os="+args.ocos,
+            "--usergroup="+urlpath,
+            "--passwd-on-stdin",
+            cas_gateway,
+        ] + args.openconnect_extra
+    else:
+        urlpath = args.interface + ":" + cn
+        openconnect_args = [
+            "--protocol=gp",
+            "--user="+un,
+            "--os="+args.ocos,
+            "--usergroup="+urlpath,
+            "--passwd-on-stdin",
+            server,
+        ] + args.openconnect_extra
 
     if args.insecure:
         openconnect_args.insert(1, "--allow-insecure-crypto")
